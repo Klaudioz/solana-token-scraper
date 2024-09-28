@@ -40,13 +40,14 @@ Need to have a `settings.json` file in the working directory with the following:
         "sec_ws_key": "YOUR_DISCORD_SECRET_WS_KEY"
     },
     "solana": {
-        "rpc_url": "YOUR_RPC_URL" // Only used for getting tokens from links. Won't be used to send transactions.
+        "rpc_url": "YOUR_RPC_URL"
     }
 }
 ```
 
 - Read how to get a Discord user account token [here](https://gist.github.com/MarvNC/e601f3603df22f36ebd3102c501116c6).
 - You can similarly obtain the `Sec-Websocket-Key` from the headers of the WebSocket request to the Discord gateway.
+- `rpc_url` is only used for getting token addresses from links. Won't be used to send transactions.
 
 ### Filters
 
