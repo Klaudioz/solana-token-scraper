@@ -1,0 +1,202 @@
+//! Handles incoming messages from the Discord event stream.
+
+use std::{str::FromStr, sync::Arc};
+
+use solana_sdk::pubkey::Pubkey;
+use tokio::sync::Mutex;
+use twilight_model::gateway::payload::incoming::MessageCreate;
+
+use crate::{
+    photon_util::{self, is_photon_link},
+    settings::DiscordFilter,
+    util::*,
+};
+
+/// Errors that can occur when handling a message.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Database error.
+    #[error("Database error: {0}")]
+    Diesel(#[from] diesel::result::Error),
+
+    /// Failed to extract token.
+    #[error("Failed to extract token: {0}")]
+    ExtractToken(#[from] ExtractTokenError),
+
+    /// Failed to send sniper request.
+    #[error("Failed to send sniper request: {0}")]
+    FailedToSendSniperRequest(#[from] reqwest::Error),
+}
+
+/// Handles an incoming Discord message.
+///
+/// This function processes a Discord message, filters it based on the provided filters,
+/// extracts a token if applicable, and sends the token to a specified endpoint.
+///
+/// # Arguments
+///
+/// * `message` - A reference to the `MessageCreate` object.
+/// * `db_connection` - An `Arc<Mutex<diesel::SqliteConnection>>` for database operations.
+/// * `discord_filters` - A slice of `DiscordFilter` objects to filter the message.
+/// * `rpc_url` - A string slice that holds the RPC URL.
+///
+/// # Errors
+///
+/// This function will return an error if there is a database error, token extraction error,
+/// or if sending the token request fails.
+pub async fn handle_message(
+    message: &MessageCreate,
+    db_connection: Arc<Mutex<diesel::SqliteConnection>>,
+    discord_filters: &[DiscordFilter],
+    rpc_url: &str,
+) -> Result<(), Error> {
+    if message.guild_id.is_none() {
+        return Ok(());
+    }
+
+    let filter = match filter_message(message, discord_filters) {
+        Some(f) => f,
+        None => return Ok(()),
+    };
+
+    let token = match process_message_for_token(message, rpc_url).await? {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    println!(
+        "Token {} detected for filter: {}",
+        console::style(token.to_string()).green(),
+        console::style(filter.name.clone()).yellow()
+    );
+    tracing::info!("Found {} for filter: {}", token.to_string(), filter.name);
+
+    if is_token_already_detected(&token.to_string(), Arc::clone(&db_connection)).await? {
+        tracing::info!("Token already detected, skipping");
+        return Ok(());
+    }
+
+    send_token_request(&token.to_string(), &filter.token_endpoint_url).await?;
+    add_token_to_db(&token.to_string(), db_connection).await?;
+    tracing::info!("Successfully sent token to endpoint: {}", token.to_string());
+
+    Ok(())
+}
+
+/// Filters a message based on the provided Discord filters.
+///
+/// This function iterates through the provided `discord_filters` and checks if the message matches any of the filters.
+/// If a match is found, the corresponding `DiscordFilter` is returned.
+///
+/// # Arguments
+///
+/// * `message` - A reference to the `MessageCreate` object.
+/// * `discord_filters` - A slice of `DiscordFilter` objects to be checked against.
+///
+/// # Returns
+///
+/// * `Some(DiscordFilter)` if a matching filter is found, otherwise `None`.
+fn filter_message(
+    message: &MessageCreate,
+    discord_filters: &[DiscordFilter],
+) -> Option<DiscordFilter> {
+    for filter in discord_filters {
+        match (filter.channel_id, filter.user_id) {
+            (Some(channel_id), Some(user_id)) => {
+                if message.channel_id.get() == channel_id && message.author.id.get() == user_id {
+                    return Some(filter.clone());
+                }
+            }
+            (Some(channel_id), None) => {
+                if message.channel_id.get() == channel_id {
+                    return Some(filter.clone());
+                }
+            }
+            (None, Some(user_id)) => {
+                if message.author.id.get() == user_id {
+                    return Some(filter.clone());
+                }
+            }
+            _ => {
+                return Some(filter.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Processes a message to extract a token.
+///
+/// This function attempts to extract a token from the message content or the descriptions of the message embeds.
+///
+/// # Arguments
+///
+/// * `message` - A reference to the `MessageCreate` object.
+///
+/// # Errors
+///
+/// Returns an `ExtractTokenError` if the token extraction fails.
+async fn process_message_for_token(
+    message: &MessageCreate,
+    rpc_url: &str,
+) -> Result<Option<Pubkey>, ExtractTokenError> {
+    tracing::debug!("Processing message: {:?}", message);
+
+    // Attempt to extract a token from the message content
+    if let Some(token) = extract_token(&message.content, rpc_url).await? {
+        return Ok(Some(token));
+    }
+
+    // Attempt to extract a token from the descriptions of the message embeds
+    for embed in &message.embeds {
+        if let Some(description) = &embed.description {
+            if let Some(token) = extract_token(description, rpc_url).await? {
+                return Ok(Some(token));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Errors that can occur when extracting a token.
+///
+/// This enum represents the possible errors that can occur during the token extraction process.
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractTokenError {
+    /// Error from the `extract_token_from_pumpfun_link` function.
+    #[error("Failed to extract token from pumpfun link: {0}")]
+    ExtractTokenFromPumpFunLink(#[from] super::util::ExtractTokenFromPumpFunLinkError),
+
+    /// Error from the `photon_util::fetch_token` function.
+    #[error("Failed to fetch token from photon link: {0}")]
+    PhotonFetchToken(#[from] super::photon_util::FetchTokenError),
+}
+
+/// Extracts a token from the given content.
+///
+/// This function checks each word in the content to see if it is a valid token address,
+/// a Pump.fun link, or a Photon link, and extracts the token if found.
+///
+/// # Arguments
+///
+/// * `content` - A string slice that holds the content to be checked.
+///
+/// # Errors
+///
+/// Returns an `ExtractTokenError` if the token extraction fails.
+async fn extract_token(content: &str, rpc_url: &str) -> Result<Option<Pubkey>, ExtractTokenError> {
+    for word in content.split_whitespace() {
+        if is_valid_token_address(word) {
+            return Ok(Some(Pubkey::from_str(word).unwrap()));
+        }
+        if is_pumpfun_link(word) {
+            return Ok(Some(extract_token_from_pumpfun_link(word)?));
+        }
+        if is_photon_link(word) {
+            return Ok(Some(photon_util::fetch_token(word, rpc_url).await?));
+        }
+    }
+
+    Ok(None)
+}

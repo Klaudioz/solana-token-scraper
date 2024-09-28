@@ -1,0 +1,11 @@
+# Build
+/target
+/logs
+
+# Environment
+.env*
+settings.json
+*.csv
+
+# Database
+database.sqlite
