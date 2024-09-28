@@ -11,11 +11,6 @@ bincode = { workspace = true }
 config = { workspace = true }
 console = { workspace = true }
 csv = { workspace = true }
-diesel = { workspace = true, features = [
-    "returning_clauses_for_sqlite_3_35",
-    "sqlite",
-] }
-diesel_migrations = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 http = { workspace = true }
 indicatif = { workspace = true }

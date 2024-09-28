@@ -1,7 +1,6 @@
 //! Main module for the solana-token-scraper program.
 //!
-//! This module sets up logging, initializes the database connection,
-//! starts the event stream, and handles incoming events.
+//! This module sets up logging, starts the event stream, and handles incoming events.
 
 #![warn(
     missing_docs,
@@ -10,7 +9,6 @@
     clippy::missing_docs_in_private_items
 )]
 
-mod database;
 mod discord;
 mod macros;
 mod message_handler;
@@ -27,10 +25,10 @@ use tokio::sync::{mpsc, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 use twilight_model::gateway::event::DispatchEvent;
 
-use crate::{database::establish_database_connection, settings::Settings};
+use crate::settings::Settings;
 
-/// Path to the database file.
-pub const DATABASE_FILE_PATH: &str = "database.sqlite";
+/// Path to the detected tokens file.
+pub const DETECTED_TOKENS_FILE_PATH: &str = "detected_tokens.txt";
 
 /// Path to the Discord filters file.
 pub const DISCORD_FILTERS_FILE_PATH: &str = "discord_filters.csv";
@@ -39,6 +37,10 @@ pub const DISCORD_FILTERS_FILE_PATH: &str = "discord_filters.csv";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::new()?;
     let discord_filters = read_discord_filters_from_csv(Path::new(DISCORD_FILTERS_FILE_PATH))?;
+    // Create the detected tokens file if it doesn't exist
+    if !Path::new(DETECTED_TOKENS_FILE_PATH).exists() {
+        std::fs::File::create(DETECTED_TOKENS_FILE_PATH)?;
+    }
 
     // Setup logging
     // Create a file layer with info level filtering
@@ -52,11 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::registry().with(file_layer).init();
 
-    // Establish database connection
-    let database_connection = Arc::new(Mutex::new(
-        establish_database_connection(DATABASE_FILE_PATH).await?,
-    ));
-
     let (discord_event_tx, mut discord_event_rx) = mpsc::unbounded_channel();
 
     // Spawn a task to manage the Discord event stream
@@ -68,14 +65,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main event loop
     while let Some(event) = discord_event_rx.recv().await {
-        let database_connection = Arc::clone(&database_connection);
         let discord_filters = discord_filters.clone();
         let rpc_url = settings.solana.rpc_url.clone();
 
         tokio::spawn(async move {
             if let DispatchEvent::MessageCreate(message) = event {
-                if let Err(e) =
-                    handle_message(&message, database_connection, &discord_filters, &rpc_url).await
+                if let Err(e) = handle_message(
+                    &message,
+                    Path::new(DETECTED_TOKENS_FILE_PATH),
+                    &discord_filters,
+                    &rpc_url,
+                )
+                .await
                 {
                     tracing::error!("Error while handling discord message: {:?}", e);
                 }

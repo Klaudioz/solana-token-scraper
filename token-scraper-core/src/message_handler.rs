@@ -1,9 +1,8 @@
 //! Handles incoming messages from the Discord event stream.
 
-use std::{str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr};
 
 use solana_sdk::pubkey::Pubkey;
-use tokio::sync::Mutex;
 use twilight_model::gateway::payload::incoming::MessageCreate;
 
 use crate::{
@@ -15,10 +14,6 @@ use crate::{
 /// Errors that can occur when handling a message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Database error.
-    #[error("Database error: {0}")]
-    Diesel(#[from] diesel::result::Error),
-
     /// Failed to extract token.
     #[error("Failed to extract token: {0}")]
     ExtractToken(#[from] ExtractTokenError),
@@ -26,27 +21,29 @@ pub enum Error {
     /// Failed to send sniper request.
     #[error("Failed to send sniper request: {0}")]
     FailedToSendSniperRequest(#[from] reqwest::Error),
+
+    /// Detected token file error.
+    #[error("Detected token file error: {0}")]
+    DetectedTokensFile(#[from] std::io::Error),
 }
 
 /// Handles an incoming Discord message.
 ///
-/// This function processes a Discord message, filters it based on the provided filters,
-/// extracts a token if applicable, and sends the token to a specified endpoint.
+/// This function processes the message to detect tokens and sends a request to the specified endpoint if a token is found.
 ///
 /// # Arguments
 ///
 /// * `message` - A reference to the `MessageCreate` object.
-/// * `db_connection` - An `Arc<Mutex<diesel::SqliteConnection>>` for database operations.
-/// * `discord_filters` - A slice of `DiscordFilter` objects to filter the message.
-/// * `rpc_url` - A string slice that holds the RPC URL.
+/// * `detected_tokens_file_path` - A reference to the path of the file where detected tokens are stored.
+/// * `discord_filters` - A slice of `DiscordFilter` objects to be checked against.
+/// * `rpc_url` - The RPC URL for Solana.
 ///
 /// # Errors
 ///
-/// This function will return an error if there is a database error, token extraction error,
-/// or if sending the token request fails.
+/// Returns an `Error` if any step in the process fails.
 pub async fn handle_message(
     message: &MessageCreate,
-    db_connection: Arc<Mutex<diesel::SqliteConnection>>,
+    detected_tokens_file_path: &Path,
     discord_filters: &[DiscordFilter],
     rpc_url: &str,
 ) -> Result<(), Error> {
@@ -64,20 +61,21 @@ pub async fn handle_message(
         None => return Ok(()),
     };
 
+    tracing::info!("Found {} for filter: {}", token.to_string(), filter.name);
+
+    if is_token_already_detected(&token.to_string(), detected_tokens_file_path).await? {
+        tracing::info!("Token already detected, skipping");
+        return Ok(());
+    }
+
     println!(
         "Token {} detected for filter: {}",
         console::style(token.to_string()).green(),
         console::style(filter.name.clone()).yellow()
     );
-    tracing::info!("Found {} for filter: {}", token.to_string(), filter.name);
-
-    if is_token_already_detected(&token.to_string(), Arc::clone(&db_connection)).await? {
-        tracing::info!("Token already detected, skipping");
-        return Ok(());
-    }
 
     send_token_request(&token.to_string(), &filter.token_endpoint_url).await?;
-    add_token_to_db(&token.to_string(), db_connection).await?;
+    add_token_to_file(&token.to_string(), detected_tokens_file_path).await?;
     tracing::info!("Successfully sent token to endpoint: {}", token.to_string());
 
     Ok(())

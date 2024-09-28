@@ -1,11 +1,14 @@
 //! Utility functions for the solana-token-scraper program.
 
-use std::{str::FromStr, sync::Arc};
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, Write},
+    path::Path,
+    str::FromStr,
+};
 
-use diesel::prelude::*;
 use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
-use tokio::sync::Mutex;
 
 /// Checks if the provided token address is valid.
 ///
@@ -39,51 +42,52 @@ pub async fn send_token_request(token: &str, url: &str) -> Result<(), reqwest::E
     Ok(())
 }
 
-/// Checks if the token is already detected in the database.
+/// Checks if a token address is already detected in a specified file.
+///
+/// This function reads the specified file line by line to check if the given token address is present.
 ///
 /// # Arguments
 ///
 /// * `token_address` - A string slice that holds the token address.
-/// * `database_connection` - An `Arc` containing the `Mutex` of the database connection.
+/// * `file_path` - A reference to the path of the file to be checked.
 ///
 /// # Errors
 ///
-/// Returns a `diesel::result::Error` if the database query fails.
+/// Returns a `std::io::Error` if the file operation fails.
 pub async fn is_token_already_detected(
     token_address: &str,
-    database_connection: Arc<Mutex<diesel::SqliteConnection>>,
-) -> Result<bool, diesel::result::Error> {
-    use crate::database::schema::tokens;
+    file_path: &Path,
+) -> Result<bool, std::io::Error> {
+    let file = OpenOptions::new().read(true).open(file_path)?;
+    let reader = std::io::BufReader::new(file);
 
-    let mut conn = database_connection.lock().await;
-    let exists = diesel::select(diesel::dsl::exists(
-        tokens::table.filter(tokens::token_address.eq(token_address)),
-    ))
-    .get_result::<bool>(&mut *conn)?;
+    for line in reader.lines() {
+        if line?.trim() == token_address {
+            return Ok(true);
+        }
+    }
 
-    Ok(exists)
+    Ok(false)
 }
 
-/// Adds a token to the database.
+/// Adds a token address to a specified file.
+///
+/// This function appends the given token address to the specified file.
 ///
 /// # Arguments
 ///
 /// * `token_address` - A string slice that holds the token address.
-/// * `database_connection` - An `Arc` containing the `Mutex` of the database connection.
+/// * `file_path` - A reference to the path of the file where the token address will be added.
 ///
 /// # Errors
 ///
-/// Returns a `diesel::result::Error` if the database insertion fails.
-pub async fn add_token_to_db(
+/// Returns a `std::io::Error` if the file operation fails.
+pub async fn add_token_to_file(
     token_address: &str,
-    database_connection: Arc<Mutex<diesel::SqliteConnection>>,
-) -> Result<(), diesel::result::Error> {
-    use crate::database::schema::tokens;
-
-    let mut conn = database_connection.lock().await;
-    diesel::insert_into(tokens::table)
-        .values(tokens::token_address.eq(token_address))
-        .execute(&mut *conn)?;
+    file_path: &Path,
+) -> Result<(), std::io::Error> {
+    let mut file = OpenOptions::new().append(true).open(file_path)?;
+    writeln!(file, "{}", token_address)?;
 
     Ok(())
 }
