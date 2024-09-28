@@ -19,7 +19,7 @@ The program connects to the Discord gateway using your token and monitors messag
 - This is not a sniping/trading bot but is designed to work alongside automation/sniping bots like [Peppermints](https://www.tensor.trade/trade/peppermints) or your custom programs with similar functionality.
 - Once a token is detected, it will send a GET request to the URL specified in the `TOKEN_ENDPOINT_URL` field.
 - The detected token addresses are saved in a local text file `detected_tokens.txt` to avoid duplicate purchases.
-- Logs are saved in `logs` directory if you want a record of detected tokens.
+- Logs are saved in `logs` directory for debugging purposes.
 
 > **IMPORTANT: Using user accounts for automation is against Discord's TOS, so use them at your own risk, preferably with accounts you can afford to lose.**
 
