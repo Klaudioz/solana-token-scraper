@@ -84,6 +84,9 @@ pub struct DiscordFilter {
     /// Token endpoint URL to filter.
     #[serde(rename = "TOKEN_ENDPOINT_URL")]
     pub token_endpoint_url: String,
+    /// Market cap to filter.
+    #[serde(rename = "MARKET_CAP")]
+    pub market_cap: Option<u128>,
 }
 
 #[derive(Error, Debug)]
