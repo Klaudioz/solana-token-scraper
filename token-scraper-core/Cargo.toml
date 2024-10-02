@@ -16,7 +16,7 @@ http = { workspace = true }
 indicatif = { workspace = true }
 raydium-amm-interface = { workspace = true, features = ["serde"] }
 regex = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 solana-client = { workspace = true }

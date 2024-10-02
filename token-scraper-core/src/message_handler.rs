@@ -2,14 +2,13 @@
 
 use std::{path::Path, str::FromStr};
 
-use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
 use twilight_model::gateway::payload::incoming::MessageCreate;
 
 use crate::{
     photon_util::{self, is_photon_link},
     settings::DiscordFilter,
-    util::*,
+    util::{self, *},
 };
 
 /// Errors that can occur when handling a message.
@@ -26,6 +25,10 @@ pub enum Error {
     /// Detected token file error.
     #[error("Detected token file error: {0}")]
     DetectedTokensFile(#[from] std::io::Error),
+
+    /// Market cap error.
+    #[error("Market cap error: {0}")]
+    MarketCap(#[from] MarketCapError),
 }
 
 /// Handles an incoming Discord message.
@@ -57,20 +60,17 @@ pub async fn handle_message(
         None => return Ok(()),
     };
 
-    if let Some(market_cap_filter) = filter.market_cap {
-        if let Some(market_cap) = extract_market_cap(&message.content) {
-            if market_cap > market_cap_filter {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        }
-    }
-
     let token = match process_message_for_token(message, rpc_url).await? {
         Some(t) => t,
         None => return Ok(()),
     };
+
+    if let Some(max_market_cap) = filter.market_cap {
+        let market_cap = get_market_cap(&token.to_string()).await?;
+        if market_cap > max_market_cap {
+            return Ok(());
+        }
+    }
 
     tracing::info!("Found {} for filter: {}", token.to_string(), filter.name);
 
@@ -210,73 +210,31 @@ async fn extract_token(content: &str, rpc_url: &str) -> Result<Option<Pubkey>, E
     Ok(None)
 }
 
-/// Extracts the market cap from the given content.
+/// Errors that can occur when getting the market cap.
+#[derive(Debug, thiserror::Error)]
+pub enum MarketCapError {
+    /// Error from the `util::get_token_price_jup` function.
+    #[error("Failed to get token price from Jupiter API: {0}")]
+    GetTokenPriceJup(#[from] util::JupPriceApiError),
+}
+
+/// Fetches the market cap of a token.
 ///
-/// This function uses a regular expression to find the market cap value in the content.
-/// The market cap is expected to be in the format `FDV: $<value><suffix>`, where `<suffix>` can be `K` for thousands or `M` for millions.
+/// This function calculates the market cap of a token by fetching its price from the Jupiter API
+/// and multiplying it by the supply of pumpfun tokens.
 ///
 /// # Arguments
 ///
-/// * `content` - A string slice that holds the content to be checked.
+/// * `token` - A string slice that holds the token symbol.
 ///
 /// # Errors
 ///
-/// Returns `None` if the market cap cannot be extracted.
-fn extract_market_cap(content: &str) -> Option<u128> {
-    let re = Regex::new(r"FDV:\s*`?\$?([\d\.]+[KM]?)`?").unwrap();
-    let caps = re.captures(content);
-    if let Some(caps) = caps {
-        let value = &caps[1];
-        let fdv: u128 = if let Some(value) = value.strip_suffix('K') {
-            (value.parse::<f64>().unwrap() * 1_000.0) as u128
-        } else if let Some(value) = value.strip_suffix('M') {
-            (value.parse::<f64>().unwrap() * 1_000_000.0) as u128
-        } else {
-            value.parse::<u128>().unwrap()
-        };
-        return Some(fdv);
-    }
-    None
-}
+/// Returns a `MarketCapError` if the request to fetch the token price fails.
+async fn get_market_cap(token: &str) -> Result<u128, MarketCapError> {
+    /// The supply of pumpfun tokens.
+    const PUMPFUN_TOKEN_SUPPLY: u128 = 1_000_000_000;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_market_cap() {
-        let content = r#"<:sol:941653282420576296> Solana @ Raydium 🔥 `#1`
-        💰 USD: `$0.0001796`
-        💎 FDV: `$179.6K`
-        💦 Liq: `$45.8K` 🐡`[x7.8]`
-        📊 Vol: `$2M` 🕰️ Age: `55m`
-        ⛰️ ATH: `$670.5K` `[21m ago]`
-        🚀 1H: `204%` ⋅ `$2.1M` 🅑 `5.5K` 🅢 `4.6K`
-        👥 TH: [11.3](https://solscan.io/account/EhSDbRzZLXhNRTrtfsYDAoYXfRP6k6MCTP53t6tsEJ7P)⋅[2.5](https://solscan.io/account/Dind5A7BakWdjD8XygQAyAjLWn76zk7rnds9M9PafqoA)⋅[2.5](https://solscan.io/account/6iAmTtqBYqy6trQsxirYakZDSRnySHfPNEyPLnaqg7Um)⋅[2.2](https://solscan.io/account/EgLQCxBUwZrEa3b9vamZ21att941nYixMVk5REise1op)⋅[2.1](https://solscan.io/account/3np7y4rbmgykpCSu3sG4291fm1CHptb6YAX2PY6aZxqS) `[30%]`
-        🖨️ Mint: ✅ ⋅ LP: 🔥
-        🧰 More: [ch](https://t.me/RickBurpBot/dsapp?startapp=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump_solana) ⋅ [bm](https://t.me/RickBurpBot/bmapp?startapp=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump_solana_def)
-
-        A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump
-        [MAE](https://t.me/MaestroSniperBot?start=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump-rickburpbot)⋅[BAN](https://t.me/BananaGunSolana_bot?start=snp_rickburpbot_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[BNK](https://t.me/mcqueen_bonkbot?start=ref_rickbot_ca_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[SHU](https://t.me/ShurikenTradeBot?start=qt-RickSanchez-A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[PEP](https://t.me/pepeboost_sol_bot?start=ref_0xRick_ca_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[DEX](https://dexscreener.com/solana/2jtegzvtn39pokjyftlyct2rzy9msureowajqfap43np)⋅[BRD](https://birdeye.so/token/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump?chain=solana)
-        [TRO](https://t.me/paris_trojanbot?start=d-RickBot-A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[STB](https://t.me/SolTradingBot?start=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump-yqC7cGy1T)⋅[PHO](https://photon-sol.tinyastro.io/en/r/@RickBurpBot/2jTeGZvtN39pokJyFTLyct2rzY9MSUReowAJQfap43NP)⋅[**BLX**](https://bullx.io/terminal?chainId=1399811149&address=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump&r=M7B0AY33YBS)⋅[EXP](https://solscan.io/account/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[RUG](https://rugcheck.xyz/tokens/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[TW](https://twitter.com/search?q=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)
-        🔥 **BETA:** Try the web checker: **.web**"#;
-
-        assert_eq!(extract_market_cap(content), Some(179600));
-
-        let content2 = r#"💎 FDV: `15.1K`
-        💦 Liq: `$45.8K` 🐡`[x7.8]`
-        📊 Vol: `$2M` 🕰️ Age: `55m`
-        ⛰️ ATH: `$670.5K` `[21m ago]`
-        🚀 1H: `204%` ⋅ `$2.1M` 🅑 `5.5K` 🅢 `4.6K`
-        👥 TH: [11.3](https://solscan.io/account/EhSDbRzZLXhNRTrtfsYDAoYXfRP6k6MCTP53t6tsEJ7P)⋅[2.5](https://solscan.io/account/Dind5A7BakWdjD8XygQAyAjLWn76zk7rnds9M9PafqoA)⋅[2.5](https://solscan.io/account/6iAmTtqBYqy6trQsxirYakZDSRnySHfPNEyPLnaqg7Um)⋅[2.2](https://solscan.io/account/EgLQCxBUwZrEa3b9vamZ21att941nYixMVk5REise1op)⋅[2.1](https://solscan.io/account/3np7y4rbmgykpCSu3sG4291fm1CHptb6YAX2PY6aZxqS) `[30%]`
-        🖨️ Mint: ✅ ⋅ LP: 🔥
-        🧰 More: [ch](https://t.me/RickBurpBot/dsapp?startapp=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump_solana) ⋅ [bm](https://t.me/RickBurpBot/bmapp?startapp=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump_solana_def)
-
-        A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump
-        [MAE](https://t.me/MaestroSniperBot?start=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump-rickburpbot)⋅[BAN](https://t.me/BananaGunSolana_bot?start=snp_rickburpbot_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[BNK](https://t.me/mcqueen_bonkbot?start=ref_rickbot_ca_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[SHU](https://t.me/ShurikenTradeBot?start=qt-RickSanchez-A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[PEP](https://t.me/pepeboost_sol_bot?start=ref_0xRick_ca_A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[DEX](https://dexscreener.com/solana/2jtegzvtn39pokjyftlyct2rzy9msureowajqfap43np)⋅[BRD](https://birdeye.so/token/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump?chain=solana)
-        [TRO](https://t.me/paris_trojanbot?start=d-RickBot-A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[STB](https://t.me/SolTradingBot?start=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump-yqC7cGy1T)⋅[PHO](https://photon-sol.tinyastro.io/en/r/@RickBurpBot/2jTeGZvtN39pokJyFTLyct2rzY9MSUReowAJQfap43NP)⋅[**BLX**](https://bullx.io/terminal?chainId=1399811149&address=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump&r=M7B0AY33YBS)⋅[EXP](https://solscan.io/account/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[RUG](https://rugcheck.xyz/tokens/A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)⋅[TW](https://twitter.com/search?q=A1WpmBTaVFbsKSm4Ab2oqaj6D6uAKmA7vSgpiQD6pump)
-        🔥 **BETA:** Try the web checker: **.web**"#;
-
-        assert_eq!(extract_market_cap(content2), Some(15100));
-    }
+    let price = util::get_token_price_jup(token, "USDC").await?;
+    let market_cap = (price * PUMPFUN_TOKEN_SUPPLY as f64) as u128;
+    Ok(market_cap)
 }
