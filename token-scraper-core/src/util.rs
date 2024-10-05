@@ -157,35 +157,56 @@ pub enum JupPriceApiError {
     /// Error during conversion of the JSON value.
     #[error("Conversion error")]
     ConversionError(serde_json::Value),
+
+    /// Error when the price is not found in the response.
+    #[error("Price not found in response: {0:?}")]
+    PriceNotFound(serde_json::Value),
 }
 
 /// Fetches the price of a token from the Jupiter API.
 ///
 /// This function sends a request to the Jupiter API to get the price of the specified token
-/// in terms of another token.
+/// in terms of another token (vs_token).
 ///
 /// # Arguments
 ///
-/// * `token` - A string slice that holds the token symbol.
-/// * `vs_token` - A string slice that holds the symbol of the token to compare against.
+/// * `token` - A string slice that holds the token address or symbol.
+/// * `vs_token` - A string slice that holds the address or symbol of the token to compare against.
+///
+/// # Returns
+///
+/// Returns a `Result<f64, JupPriceApiError>` where the `f64` is the price of the token.
 ///
 /// # Errors
 ///
-/// Returns a `JupPriceApiError` if the request fails or the response cannot be parsed.
+/// Returns a `JupPriceApiError` if:
+/// - The request to the Jupiter API fails.
+/// - The response cannot be parsed as JSON.
+/// - The price information is not found in the response.
+/// ```
 pub async fn get_token_price_jup(token: &str, vs_token: &str) -> Result<f64, JupPriceApiError> {
+    // Construct the URL for the Jupiter API request
     let url = format!(
         "{}?ids={}&vsToken={}",
         JUPITER_PRICE_API_URL, token, vs_token
     );
+
+    // Send GET request to the Jupiter API and parse the response as JSON
     let resp = reqwest::get(&url)
         .await?
         .json::<serde_json::Value>()
         .await?;
-    let price = resp.get("data").unwrap().get(token).unwrap().get("price");
-    price
-        .unwrap()
-        .as_f64()
-        .ok_or(JupPriceApiError::ConversionError(resp))
+
+    // Extract the price from the response
+    resp.get("data")
+        .and_then(|data| data.get(token))
+        .and_then(|token_data| token_data.get("price"))
+        .ok_or_else(|| JupPriceApiError::PriceNotFound(resp.clone()))
+        .and_then(|price| {
+            price
+                .as_f64()
+                .ok_or_else(|| JupPriceApiError::ConversionError(price.clone()))
+        })
 }
 
 #[cfg(test)]

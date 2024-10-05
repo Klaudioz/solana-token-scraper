@@ -66,9 +66,22 @@ pub async fn handle_message(
     };
 
     if let Some(max_market_cap) = filter.market_cap {
-        let market_cap = get_market_cap(&token.to_string()).await?;
-        if market_cap > max_market_cap {
-            return Ok(());
+        let market_cap_res = get_market_cap(&token.to_string()).await;
+        match market_cap_res {
+            Ok(market_cap) => {
+                if market_cap > max_market_cap {
+                    return Ok(());
+                } else {
+                    tracing::debug!("Market cap is too high: {}", market_cap);
+                }
+            }
+            Err(MarketCapError::GetTokenPriceJup(JupPriceApiError::PriceNotFound(resp))) => {
+                tracing::debug!("Price not found: {}", resp);
+                tracing::debug!("Proceeding with sniper request")
+            }
+            Err(err) => {
+                return Err(Error::MarketCap(err));
+            }
         }
     }
 
