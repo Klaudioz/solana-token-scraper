@@ -6,9 +6,8 @@
 .env*
 
 # Settings
-settings.json
+settings*.json
 *.csv
 
 # Detected tokens
 detected_tokens.txt
-

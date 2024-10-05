@@ -10,6 +10,9 @@ use std::{
 use regex::Regex;
 use solana_sdk::pubkey::Pubkey;
 
+/// The base URL for the Jupiter price API.
+pub const JUPITER_PRICE_API_URL: &str = "https://price.jup.ag/v6/price";
+
 /// Checks if the provided token address is valid.
 ///
 /// # Arguments
@@ -137,6 +140,75 @@ pub fn extract_token_from_pumpfun_link(
     Ok(Pubkey::from_str(token.as_str())?)
 }
 
+/// Errors that can occur when fetching the price from the Jupiter API.
+///
+/// This enum represents the possible errors that can occur during the process of fetching
+/// the token price from the Jupiter API.
+#[derive(Debug, thiserror::Error)]
+pub enum JupPriceApiError {
+    /// Error from the `reqwest` crate.
+    #[error("Reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    /// Error from the `serde_json` crate.
+    #[error("Serde JSON error: {0}")]
+    SerdeJson(#[from] serde_json::Error),
+
+    /// Error during conversion of the JSON value.
+    #[error("Conversion error")]
+    ConversionError(serde_json::Value),
+
+    /// Error when the price is not found in the response.
+    #[error("Price not found in response: {0:?}")]
+    PriceNotFound(serde_json::Value),
+}
+
+/// Fetches the price of a token from the Jupiter API.
+///
+/// This function sends a request to the Jupiter API to get the price of the specified token
+/// in terms of another token (vs_token).
+///
+/// # Arguments
+///
+/// * `token` - A string slice that holds the token address or symbol.
+/// * `vs_token` - A string slice that holds the address or symbol of the token to compare against.
+///
+/// # Returns
+///
+/// Returns a `Result<f64, JupPriceApiError>` where the `f64` is the price of the token.
+///
+/// # Errors
+///
+/// Returns a `JupPriceApiError` if:
+/// - The request to the Jupiter API fails.
+/// - The response cannot be parsed as JSON.
+/// - The price information is not found in the response.
+/// ```
+pub async fn get_token_price_jup(token: &str, vs_token: &str) -> Result<f64, JupPriceApiError> {
+    // Construct the URL for the Jupiter API request
+    let url = format!(
+        "{}?ids={}&vsToken={}",
+        JUPITER_PRICE_API_URL, token, vs_token
+    );
+
+    // Send GET request to the Jupiter API and parse the response as JSON
+    let resp = reqwest::get(&url)
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    // Extract the price from the response
+    resp.get("data")
+        .and_then(|data| data.get(token))
+        .and_then(|token_data| token_data.get("price"))
+        .ok_or_else(|| JupPriceApiError::PriceNotFound(resp.clone()))
+        .and_then(|price| {
+            price
+                .as_f64()
+                .ok_or_else(|| JupPriceApiError::ConversionError(price.clone()))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +247,15 @@ mod tests {
             .unwrap(),
             Pubkey::from_str("5eMZuRe5JfEz7hdv3ZorNsmcMs4qEGiGH1esFJsJFHka").unwrap()
         );
+    }
+
+    /// Tests the `get_token_price_jup` function.
+    #[tokio::test]
+    async fn test_get_token_price_jup() {
+        // Test with a valid token and vs_token
+        let price =
+            get_token_price_jup("CT6sgK6Yz6LyfnSnY3PhS2VdvD2tFYkazPrNZEhNpump", "USDC").await;
+
+        assert!(price.is_ok(), "{}", price.err().unwrap());
     }
 }

@@ -8,7 +8,7 @@ use twilight_model::gateway::payload::incoming::MessageCreate;
 use crate::{
     photon_util::{self, is_photon_link},
     settings::DiscordFilter,
-    util::*,
+    util::{self, *},
 };
 
 /// Errors that can occur when handling a message.
@@ -25,6 +25,10 @@ pub enum Error {
     /// Detected token file error.
     #[error("Detected token file error: {0}")]
     DetectedTokensFile(#[from] std::io::Error),
+
+    /// Market cap error.
+    #[error("Market cap error: {0}")]
+    MarketCap(#[from] MarketCapError),
 }
 
 /// Handles an incoming Discord message.
@@ -60,6 +64,26 @@ pub async fn handle_message(
         Some(t) => t,
         None => return Ok(()),
     };
+
+    if let Some(max_market_cap) = filter.market_cap {
+        let market_cap_res = get_market_cap(&token.to_string()).await;
+        match market_cap_res {
+            Ok(market_cap) => {
+                if market_cap > max_market_cap {
+                    return Ok(());
+                } else {
+                    tracing::debug!("Market cap is too high: {}", market_cap);
+                }
+            }
+            Err(MarketCapError::GetTokenPriceJup(JupPriceApiError::PriceNotFound(resp))) => {
+                tracing::debug!("Price not found: {}", resp);
+                tracing::debug!("Proceeding with sniper request")
+            }
+            Err(err) => {
+                return Err(Error::MarketCap(err));
+            }
+        }
+    }
 
     tracing::info!("Found {} for filter: {}", token.to_string(), filter.name);
 
@@ -197,4 +221,33 @@ async fn extract_token(content: &str, rpc_url: &str) -> Result<Option<Pubkey>, E
     }
 
     Ok(None)
+}
+
+/// Errors that can occur when getting the market cap.
+#[derive(Debug, thiserror::Error)]
+pub enum MarketCapError {
+    /// Error from the `util::get_token_price_jup` function.
+    #[error("Failed to get token price from Jupiter API: {0}")]
+    GetTokenPriceJup(#[from] util::JupPriceApiError),
+}
+
+/// Fetches the market cap of a token.
+///
+/// This function calculates the market cap of a token by fetching its price from the Jupiter API
+/// and multiplying it by the supply of pumpfun tokens.
+///
+/// # Arguments
+///
+/// * `token` - A string slice that holds the token symbol.
+///
+/// # Errors
+///
+/// Returns a `MarketCapError` if the request to fetch the token price fails.
+async fn get_market_cap(token: &str) -> Result<u128, MarketCapError> {
+    /// The supply of pumpfun tokens.
+    const PUMPFUN_TOKEN_SUPPLY: u128 = 1_000_000_000;
+
+    let price = util::get_token_price_jup(token, "USDC").await?;
+    let market_cap = (price * PUMPFUN_TOKEN_SUPPLY as f64) as u128;
+    Ok(market_cap)
 }
